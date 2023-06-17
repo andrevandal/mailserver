@@ -1,30 +1,77 @@
+version: "3.7"
+
+x-default-opts: 
+  &default-opts
+  logging:
+    options:
+      max-size: "10m" 
+
 services:
   mailserver:
-    image: docker.io/mailserver/docker-mailserver:latest
+    <<: *default-opts
+    image: ghcr.io/docker-mailserver/docker-mailserver:latest
     container_name: mailserver
-    # If the FQDN for your mail-server is only two labels (eg: example.com),
-    # you can assign this entirely to `hostname` and remove `domainname`.
     hostname: mail
-    domainname: example.com
-    env_file: mailserver.env
-    # More information about the mail-server ports:
-    # https://docker-mailserver.github.io/docker-mailserver/edge/config/security/understanding-the-ports/
-    # To avoid conflicts with yaml base-60 float, DO NOT remove the quotation marks.
-    ports:
-      - "25:25"    # SMTP  (explicit TLS => STARTTLS)
-      - "143:143"  # IMAP4 (explicit TLS => STARTTLS)
-      - "465:465"  # ESMTP (implicit TLS)
-      - "587:587"  # ESMTP (explicit TLS => STARTTLS)
-      - "993:993"  # IMAP4 (implicit TLS)
+    domainname: vandal.services
     volumes:
-      - ./docker-data/dms/mail-data/:/var/mail/
-      - ./docker-data/dms/mail-state/:/var/mail-state/
-      - ./docker-data/dms/mail-logs/:/var/log/mail/
+      - maillogs:/var/log/mail/
+      - ./var/mail/:/var/mail/
+      - ./var/mail-state/:/var/mail-state/
       - ./docker-data/dms/config/:/tmp/docker-mailserver/
+      - ./docker-data/certbot/certs/:/etc/letsencrypt/:ro
       - /etc/localtime:/etc/localtime:ro
     restart: always
+    environment:
+      - LOG_LEVEL=info
+      - ENABLE_FAIL2BAN=0
+      - SSL_TYPE=letsencrypt
+      - PERMIT_DOCKER=network
+      - SPOOF_PROTECTION=1
+      - ENABLE_QUOTAS=1
+    ports:
+      - "25:25"
+      - "465:465"
+      - "993:993"
+      - "587:587"
+      - "143:143"
     stop_grace_period: 1m
     cap_add:
       - NET_ADMIN
       - SYS_PTRACE
+  
+  certbot-cloudflare:
+    container_name: mailserver-certbot
+    image: certbot/dns-cloudflare:latest
+    command: certonly --dns-cloudflare --dns-cloudflare-credentials /run/secrets/cloudflare-api-token -d mail.vandal.services
+    volumes:
+      - ./docker-data/certbot/certs/:/etc/letsencrypt/
+      - ./docker-data/certbot/logs/:/var/log/letsencrypt/
+    secrets:
+      - cloudflare-api-token
 
+  certbot-cron:
+    image: certbot/dns-cloudflare:latest
+    container_name: certbot-cron
+    volumes:
+      - ./docker-data/certbot/certs/:/etc/letsencrypt/
+      - ./docker-data/certbot/logs/:/var/log/letsencrypt/
+      - /etc/localtime:/etc/localtime:ro
+    secrets:
+      - cloudflare-api-token
+    entrypoint: "/bin/sh -c"
+    command: >
+      'echo "SLEEPTIME=$$(awk \"BEGIN{srand(); print int(rand()*(3600+1))}\");
+      echo \"0 0,12 * * * root sleep $$SLEEPTIME && certbot renew --dns-cloudflare --dns-cloudflare-credentials /run/secrets/cloudflare-api-token -q\" >> /etc/crontabs/root
+      && crond -f'
+      
+volumes:
+  maillogs:
+    driver: local
+
+secrets:
+  cloudflare-api-token:
+    file: ./docker-data/certbot/secrets/cloudflare.ini
+
+### EXAMPLE
+# Cloudflare API token used by Certbot
+#dns_cloudflare_api_token = banana
